@@ -1,6 +1,8 @@
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
+import re
+import shutil
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
@@ -20,6 +22,7 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QFileDialog,
 )
 
 from app.core.models.ui import UIState
@@ -75,7 +78,6 @@ class MainWindow(QMainWindow):
         self.preview_page_label = QLabel("第 0 / 0 页")
         self.preview_prev_button = QPushButton("上一页")
         self.preview_next_button = QPushButton("下一页")
-        # --- 新增：创建下载按钮 --
         self.download_button = QPushButton("下载 PDF")
 
         self.log_view = QTextEdit()
@@ -91,27 +93,36 @@ class MainWindow(QMainWindow):
         self.current_page_index: int = 0
         self.current_page_count: int = 0
 
-        # --- 新增：缩放相关定义 ---
-        self.zoom_factor = 1.3  # 默认缩放倍数
+        # 缩放相关定义
+        self.zoom_factor = 1.3
         self.zoom_in_button = QPushButton("放大 +")
         self.zoom_out_button = QPushButton("缩小 -")
-        # --- 新增：缩放比例显示标签 ---
         self.zoom_level_label = QLabel("130%")
         self.zoom_level_label.setStyleSheet("margin: 0 5px; color: #555; font-weight: bold;")
         
-        # 绑定点击事件
         self.zoom_in_button.clicked.connect(self.zoom_in)
         self.zoom_out_button.clicked.connect(self.zoom_out)
         
-        # 初始设为不可用
         self.zoom_in_button.setEnabled(False)
         self.zoom_out_button.setEnabled(False)
 
-
-        #------------------------------
+        # ========== 新增：API 配置区域 ==========
+        self.api_group = QGroupBox("⚙️ API 配置（修改后需重启程序）")
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("输入你的 API Key")
+        self.base_url_input = QLineEdit()
+        self.base_url_input.setPlaceholderText("https://api.deepseek.com")
+        self.model_input = QLineEdit()
+        self.model_input.setPlaceholderText("deepseek-chat")
+        self.save_api_btn = QPushButton("保存配置")
+        self.save_api_btn.clicked.connect(self.save_api_config)
+        # =====================================
 
         self._build_ui()
         self._load_templates()
+        self._load_api_config()  # 加载已保存的配置
+        
         self.start_questionnaire_button.clicked.connect(self.start_questionnaire)
         self.prev_question_button.clicked.connect(self.prev_question)
         self.skip_question_button.clicked.connect(self.skip_question)
@@ -120,7 +131,6 @@ class MainWindow(QMainWindow):
         self.history_list.itemClicked.connect(self._load_history_item)
         self.preview_prev_button.clicked.connect(self.preview_prev_page)
         self.preview_next_button.clicked.connect(self.preview_next_page)
-        # --- 新增：绑定下载点击事件 --
         self.download_button.clicked.connect(self.handle_download)
 
         self.generate_button.setEnabled(False)
@@ -129,8 +139,6 @@ class MainWindow(QMainWindow):
         self.skip_question_button.setEnabled(False)
         self.preview_prev_button.setEnabled(False)
         self.preview_next_button.setEnabled(False)
-        
-       
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -171,17 +179,15 @@ class MainWindow(QMainWindow):
         preview_toolbar.addWidget(self.preview_prev_button)
         preview_toolbar.addWidget(self.preview_next_button)
         preview_toolbar.addWidget(self.preview_page_label)
-        # --- 新增：缩放按钮 ---
-        preview_toolbar.addSpacing(15) # 加一点间距
+        preview_toolbar.addSpacing(15)
         preview_toolbar.addWidget(self.zoom_out_button)
         preview_toolbar.addWidget(self.zoom_level_label)
         preview_toolbar.addWidget(self.zoom_in_button)
-        # --------------------
         preview_toolbar.addStretch(1)
-        preview_toolbar.addWidget(self.download_button)  # --- 新增：添加下载按钮到预览工具栏 --
+        preview_toolbar.addWidget(self.download_button)
+        
         preview_scroll = QScrollArea()
         preview_scroll.setWidgetResizable(False)
-        # 让图片在滚动区域里居中显示，这样缩小后比较美观
         preview_scroll.setAlignment(Qt.AlignCenter)
         preview_scroll.setWidget(self.preview_label)
         preview_layout.addLayout(preview_toolbar)
@@ -209,6 +215,20 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(status_banner)
         root_layout.addLayout(toolbar)
         root_layout.addWidget(body_splitter, 1)
+        
+        # ========== 新增：API 配置区域布局 ==========
+        api_layout = QHBoxLayout()
+        api_layout.addWidget(QLabel("API Key:"))
+        api_layout.addWidget(self.api_key_input, 2)
+        api_layout.addWidget(QLabel("Base URL:"))
+        api_layout.addWidget(self.base_url_input, 2)
+        api_layout.addWidget(QLabel("模型:"))
+        api_layout.addWidget(self.model_input, 1)
+        api_layout.addWidget(self.save_api_btn)
+        self.api_group.setLayout(api_layout)
+        root_layout.addWidget(self.api_group)
+        # ===========================================
+        
         root_layout.addWidget(self.status_label)
 
         self.setCentralWidget(central)
@@ -218,6 +238,78 @@ class MainWindow(QMainWindow):
         self.template_selector.clear()
         self.template_selector.addItems(templates)
         self.state.selected_template_id = templates[0]
+
+    # ========== 新增：API 配置相关方法 ==========
+    def _load_api_config(self) -> None:
+        """加载已保存的 API 配置"""
+        config_file = Path("call_example.py")
+        if config_file.exists():
+            content = config_file.read_text(encoding="utf-8")
+            # 提取 api_key
+            match = re.search(r'api_key="([^"]*)"', content)
+            if match:
+                self.api_key_input.setText(match.group(1))
+            # 提取 base_url
+            match = re.search(r'base_url="([^"]*)"', content)
+            if match:
+                self.base_url_input.setText(match.group(1))
+        
+        # 加载模型名称
+        model_file = Path("model_config.txt")
+        if model_file.exists():
+            self.model_input.setText(model_file.read_text(encoding="utf-8").strip())
+        else:
+            self.model_input.setText("deepseek-chat")
+
+    def save_api_config(self) -> None:
+        """保存 API 配置到 call_example.py"""
+        api_key = self.api_key_input.text().strip()
+        base_url = self.base_url_input.text().strip()
+        model = self.model_input.text().strip()
+        
+        if not api_key:
+            QMessageBox.warning(self, "提示", "请输入 API Key")
+            return
+        
+        if not base_url:
+            base_url = "https://api.deepseek.com"
+        if not model:
+            model = "deepseek-chat"
+        
+        # 读取或创建配置文件
+        config_file = Path("call_example.py")
+        if config_file.exists():
+            content = config_file.read_text(encoding="utf-8")
+        else:
+            content = '''from openai import OpenAI
+
+client = OpenAI(
+    api_key="",
+    base_url="https://api.deepseek.com",
+)
+'''
+        
+        # 替换 api_key 和 base_url
+        content = re.sub(r'api_key="[^"]*"', f'api_key="{api_key}"', content)
+        content = re.sub(r'base_url="[^"]*"', f'base_url="{base_url}"', content)
+        
+        # 保存文件
+        config_file.write_text(content, encoding="utf-8")
+        
+        # 保存模型名称
+        model_file = Path("model_config.txt")
+        model_file.write_text(model, encoding="utf-8")
+        
+        QMessageBox.information(
+            self, "成功", 
+            f"配置已保存！\n\n"
+            f"API Key: {api_key[:10]}...\n"
+            f"Base URL: {base_url}\n"
+            f"模型: {model}\n\n"
+            f"请重启程序使配置生效。"
+        )
+        self.status_label.setText("配置已保存，请重启程序")
+    # ============================================
 
     def start_questionnaire(self) -> None:
         required_fields = self.controller.questionnaire.get_question_fields()
@@ -445,7 +537,6 @@ class MainWindow(QMainWindow):
             return 0
         try:
             import fitz
-
             document = fitz.open(pdf_path)
             count = int(document.page_count)
             document.close()
@@ -457,13 +548,9 @@ class MainWindow(QMainWindow):
         has_pdf = self.current_page_count > 0
         self.preview_prev_button.setEnabled(has_pdf and self.current_page_index > 0)
         self.preview_next_button.setEnabled(has_pdf and self.current_page_index < self.current_page_count - 1)
-       
-        # --- cxy新增：只有有 PDF 时才允许点击下载 ---
         self.download_button.setEnabled(has_pdf)
         self.zoom_in_button.setEnabled(has_pdf)
         self.zoom_out_button.setEnabled(has_pdf)
-        #-----------------------------------------------
-
        
         if has_pdf:
             self.preview_page_label.setText("第 {0} / {1} 页".format(self.current_page_index + 1, self.current_page_count))
@@ -505,15 +592,12 @@ class MainWindow(QMainWindow):
             if page_index < 0 or page_index >= document.page_count:
                 page_index = 0
             page = document.load_page(page_index)
-            #cxy修改为动态倍数
             matrix = fitz.Matrix(self.zoom_factor, self.zoom_factor)
             pix = page.get_pixmap(matrix=matrix, alpha=False)
             image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
             self.preview_label.setPixmap(QPixmap.fromImage(image.copy()))
             self.preview_label.setText("")
-            # --- 新增这一行 ---
-            self.preview_label.adjustSize() 
-            # -----------------
+            self.preview_label.adjustSize()
             self.current_page_count = int(document.page_count)
             self.current_page_index = page_index
             document.close()
@@ -521,16 +605,13 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.preview_label.setText("PDF 预览失败: {0}".format(exc))
             self.preview_label.setPixmap(QPixmap())
+
     def handle_download(self) -> None:
         """实现 PDF 下载另存为功能"""
-        import shutil
-        from PyQt5.QtWidgets import QFileDialog
-
         if not self.current_pdf_path or not Path(self.current_pdf_path).exists():
             QMessageBox.warning(self, "提示", "当前没有可导出的 PDF 文件。")
             return
 
-        # 弹出保存对话框
         save_path, _ = QFileDialog.getSaveFileName(
             self, "导出 PDF", f"师爷导出_{datetime.now().strftime('%H%M%S')}.pdf", "PDF Files (*.pdf)"
         )
@@ -546,17 +627,19 @@ class MainWindow(QMainWindow):
         """更新缩放文字显示"""
         percent = int(self.zoom_factor * 100)
         self.zoom_level_label.setText(f"{percent}%")
+    
     def zoom_in(self) -> None:
         """放大"""
-        self.zoom_factor += 0.2  # 每次增加 20%
-        if self.zoom_factor > 3.0: self.zoom_factor = 3.0 # 设置上限
+        self.zoom_factor += 0.2
+        if self.zoom_factor > 3.0:
+            self.zoom_factor = 3.0
         self.update_zoom_display()
         self._render_pdf_preview(self.current_pdf_path, self.current_page_index)
 
     def zoom_out(self) -> None:
         """缩小"""
-        self.zoom_factor -= 0.2  # 每次减少 20%
-        if self.zoom_factor < 0.5: self.zoom_factor = 0.5 # 设置下限，防止太小看不见
+        self.zoom_factor -= 0.2
+        if self.zoom_factor < 0.5:
+            self.zoom_factor = 0.5
         self.update_zoom_display()
         self._render_pdf_preview(self.current_pdf_path, self.current_page_index)
-        
