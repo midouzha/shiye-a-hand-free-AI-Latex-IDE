@@ -457,16 +457,24 @@ class PreviewPage(QWidget):
         self.btn_dl.setEnabled(False); self.btn_dl.clicked.connect(self._dl); tb.addWidget(self.btn_dl)
         left.addLayout(tb)
 
-        self.scroll = QScrollArea(); self.scroll.setWidgetResizable(True); self.scroll.setAlignment(Qt.AlignCenter)
+        self.scroll = QScrollArea();
+        self.scroll.setWidgetResizable(True); 
+        self.scroll.setAlignment(Qt.AlignCenter)
         self.scroll.setStyleSheet(f"QScrollArea {{ background: {BG_BASE}; border: 1px solid {BORDER}; border-radius: {R_LG}; }}")
         cont = QWidget(); cont.setStyleSheet("background: transparent;")
-        cll = QVBoxLayout(cont); cll.setContentsMargins(20, 16, 20, 16)
+        cll = QVBoxLayout(cont); 
+        
+        cll.setContentsMargins(20, 16, 20, 16)
+        
+       
         self.lbl_preview = QLabel("生成完成后 PDF 预览将显示在此处")
-        self.lbl_preview.setAlignment(Qt.AlignCenter); self.lbl_preview.setWordWrap(True)
-        self.lbl_preview.setMinimumSize(300, 300)
+        self.lbl_preview.setAlignment(Qt.AlignCenter); 
+        self.lbl_preview.setWordWrap(True)
+        
         self.lbl_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.lbl_preview.setStyleSheet(f"color: {TEXT_TERTIARY}; font-size: 15px; background: transparent;")
-        cll.addWidget(self.lbl_preview, 0, Qt.AlignHCenter | Qt.AlignVCenter); cll.addStretch(1)
+        cll.addWidget(self.lbl_preview,0, Qt.AlignCenter)
+        
         self.scroll.setWidget(cont); left.addWidget(self.scroll, 1)
         lw = QWidget(); lw.setLayout(left); body.addWidget(lw, 1)
 
@@ -529,7 +537,9 @@ class PreviewPage(QWidget):
             px = pg.get_pixmap(matrix=mat, alpha=False)
             img = QImage(px.samples, px.width, px.height, px.stride, QImage.Format_RGB888)
             self.lbl_preview.setPixmap(QPixmap.fromImage(img.copy()))
-            self.lbl_preview.setText(""); self.lbl_preview.adjustSize()
+            self.lbl_preview.setText(""); self.lbl_preview.setFixedSize(img.size())
+            
+            
             self.page_cnt = int(d.page_count); self.page_idx = i; d.close(); self._uc()
         except Exception as e:
             self.lbl_preview.setText(f"预览失败: {e}")
@@ -668,30 +678,31 @@ class MainWindow(QMainWindow):
     def _on_result(self, result):
         self.state.busy = False
         self.qa_page.gen_btn.setEnabled(True)
+        
+        if not result.success:
+            # 恢复报错弹窗，这样 401 错误就会重新正常显示
+            QMessageBox.warning(self, "生成失败", result.message)
+            return
+
+        # 1. 记录真实的生成结果
         self.state.last_message = result.message
         self.state.last_pdf_path = result.pdf_path
-        self.state.last_tex_path = result.tex_path
+        
+        # 2. 正常切换到预览页面
         self._completed = max(self._completed, 5)
         self._go(S_PRE)
 
-        if result.success:
+        # 3. 加载真实的 PDF 文件而非 test.pdf
+        if result.pdf_path and Path(result.pdf_path).exists():
             self.preview_page.set_pdf(result.pdf_path)
-            self.preview_page.summary.setPlainText(
-                f"模板：{self._sel_tpl}\nPDF：{result.pdf_path}\n"
-                f"TeX：{result.tex_path}\n"
-                f"Outline：{' / '.join(result.outline) if result.outline else '-'}")
-            if result.logs:
-                self.preview_page.log.setPlainText("\n".join(result.logs))
+            self.preview_page.summary.setPlainText(result.message)
+            
+            # 更新侧边栏历史记录
             ts = datetime.now().strftime("%H:%M")
             self.sidebar.append_history(
-                f"{self._sel_tpl}\n{ts} · 成功",
-                {"pdf_path": result.pdf_path, "tex_path": result.tex_path, "message": result.message})
-        else:
-            self.preview_page.summary.setPlainText(result.message)
-            if result.logs:
-                self.preview_page.log.setPlainText("\n".join(result.logs))
-            QMessageBox.warning(self, "生成失败", result.message)
-
+                f"生成成功\n{ts}", 
+                {"pdf_path": result.pdf_path, "message": result.message}
+            )
     def _on_hist(self, item):
         p = item.data(Qt.UserRole) or {}
         pdf = p.get("pdf_path", "")
